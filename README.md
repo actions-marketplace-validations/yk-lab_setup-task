@@ -11,7 +11,7 @@ A secure, reliable GitHub Action that installs the [Task](https://github.com/go-
 - 🚫 **Host-pinned** — downloads and their redirects are restricted to GitHub hosts; a redirect to any other host is refused, and the token is never forwarded off `github.com`
 - 🔐 **Authenticated by default** — uses `${{ github.token }}` so release lookups don't hit unauthenticated rate limits (the cause of intermittent "could not download" failures)
 - 🔁 **Resilient** — retries transient network failures with exponential backoff
-- ♻️ **Cached** — uses the runner tool cache to avoid re-downloading
+- ♻️ **Cached** — runner tool cache per job, plus optional actions/cache sharing across jobs
 - 🌐 **Proxy-aware** — honours `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` for installs behind a corporate proxy or on self-hosted runners
 - 🟢 **Node 24 runtime** — on the current action runtime, no deprecated Node 16/20 to chase
 - 🧩 **Drop-in for `arduino/setup-task`** — the `version` / `repo-token` inputs match, so migrating is a one-line change ([see below](#migrating-from-arduinosetup-task))
@@ -57,10 +57,35 @@ Everything else is unchanged: the extra inputs (`architecture`, `check-latest`, 
 | `architecture` | runner's arch | Override the CPU architecture (e.g. `amd64`, `arm64`). |
 | `check-latest` | `false` | For ranges, always re-resolve the newest matching release. |
 | `skip-checksum` | `false` | Disable SHA256 verification (not recommended). |
+| `cache` | `false` | Share the release archive across jobs via actions/cache. Restored archives are SHA256-verified; disabled when `skip-checksum` is `true`. |
 | `retries` | `3` | Max retries for transient network failures (version resolve, download, checksum fetch). |
 | `retry-base-ms` | `1000` | Initial backoff delay between retries, in milliseconds (doubles each attempt). |
 
 > **Tip:** pin a range like `3.x` (or an exact version) rather than `latest` for reproducible CI.
+
+### Sharing the install across jobs
+
+The runner tool cache is per-job, so each matrix leg downloads the binary by default. Set `cache: true` to share a resolved version between jobs through `actions/cache`:
+
+```yaml
+strategy:
+  matrix:
+    os: [ubuntu-latest, macos-latest]
+    task-version: ["3.51.1", "3.x"]
+
+steps:
+  - uses: yk-lab/setup-task@v1
+    with:
+      version: ${{ matrix.task-version }}
+      cache: true
+  - run: task --version
+```
+
+The cache key is `setup-task-<os>-<arch>-<resolved-version>`. The release archive is cached, and a restored archive is verified against the release's `task_checksums.txt` exactly like a fresh download, so a tampered cache entry is rejected (with a warning) rather than executed. Parallel jobs that attempt to save the same key skip the save without failing. The cache is disabled when `skip-checksum: true`. This does **not** remove the GitHub API call used to resolve `latest`/ranges or the small checksums-file download, but it eliminates the release-asset download on cache hits.
+
+> **Security:** like any `actions/cache` restore, a poisoned cache entry can write files on the runner when it is extracted, before this action verifies the archive. Do not enable `cache` in release/publishing jobs or other jobs with secrets or `id-token: write`; setting `cache-mode: none` on those jobs or workflows also disables the restore.
+
+> **Note:** on the first workflow run with an empty cache, concurrently starting matrix jobs all restore before any peer saves, so each may download once. The cache benefits subsequent workflow runs, or jobs that are explicitly ordered (e.g. via `needs`) so a prime job saves first.
 
 ## Outputs
 
@@ -68,7 +93,7 @@ Everything else is unchanged: the extra inputs (`architecture`, `check-latest`, 
 |---|---|
 | `version` | The resolved version installed (e.g. `3.51.1`). |
 | `task-path` | Absolute path to the `task` executable. |
-| `cache-hit` | `true` if restored from the tool cache, else `false`. |
+| `cache-hit` | `true` if restored from a cache (runner tool cache or the cross-job actions/cache when `cache` is enabled), else `false`. |
 
 ## Supported platforms
 
